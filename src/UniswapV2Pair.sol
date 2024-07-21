@@ -202,22 +202,21 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         emit Burn(msg.sender, amount0, amount1, to);
     }
 
-    function swap(
-        uint amount0Out,
-        uint amount1Out,
-        address to,
-        bytes calldata data
-    ) external lock {
+    function swap(uint amount0Out, uint amount1Out, address to) external lock {
         require(
             amount0Out > 0 || amount1Out > 0,
             "UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT"
         );
 
         if (_checkIsNewBlock()) {
-            // settle all trades from the previous block
+            _settleRemainder();
         }
 
-        _pushNewOrderForCoW(amount0Out, amount1Out);
+        if (_canExecuteCoW(amount0Out, amount1Out)) {
+            _matchCoW(to, amount0Out, amount1Out);
+        } else {
+            _pushNewOrderForCoW(amount0Out, amount1Out);
+        }
     }
 
     function _checkIsNewBlock() internal view returns (bool) {
@@ -225,6 +224,29 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         if (orders[blockNum].blockNum == 0) {
             return true;
         }
+    }
+
+    function _settleRemainder() internal {
+        CoW.Orders storage currentOrders = orders[block.number - 1];
+        for (uint i = 0; i < currentOrders.orders.length; i++) {
+            CoW.Order memory order = currentOrders.orders[i];
+            _ammSwap(order.amount0Out, order.amount1Out, order.taker, "");
+        }
+    }
+
+    function _canExecuteCoW(
+        uint256 amount0Out,
+        uint256 amount1Out
+    ) internal view returns (bool) {
+        uint256 blockNum = block.number;
+        CoW.Orders memory currentOrders = orders[blockNum];
+        if (amount0Out > 0 && currentOrders.totalAmount1Out > 0) {
+            return true;
+        }
+        if (amount1Out > 0 && currentOrders.totalAmount0Out > 0) {
+            return true;
+        }
+        return false;
     }
 
     function _pushNewOrderForCoW(uint amount0Out, uint amount1Out) internal {
@@ -242,6 +264,107 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         currentOrders.totalAmount1Out = currentOrders.totalAmount1Out.add(
             amount1Out
         );
+    }
+
+    function _matchCoW(
+        address taker,
+        uint256 amount0Out,
+        uint256 amount1Out
+    ) internal {
+        _performToken0CoWMatching(taker, amount0Out);
+        _performToken1CowMatching(taker, amount1Out);
+    }
+
+    function _performToken0CoWMatching(address taker, uint256 amount) internal {
+        if (amount == 0) {
+            return;
+        }
+        CoW.Orders storage currentOrders = orders[block.number];
+        for (uint i = 0; i < currentOrders.orders.length; i++) {
+            CoW.Order memory order = currentOrders.orders[i];
+            uint256 amount1Out = order.amount1Out;
+            if (amount1Out > 0) {
+                if (amount1Out > amount) {
+                    _safeTransfer(token0, taker, amount);
+                    _safeTransfer(token1, order.taker, amount);
+                    currentOrders.totalAmount0Out = currentOrders
+                        .totalAmount0Out
+                        .sub(amount);
+                    currentOrders.totalAmount1Out = currentOrders
+                        .totalAmount1Out
+                        .sub(amount);
+                    amount = 0;
+                    order.amount1Out = order.amount1Out.sub(amount);
+                    currentOrders.orders[i] = order;
+                } else {
+                    _safeTransfer(token0, taker, amount1Out);
+                    _safeTransfer(token1, order.taker, amount1Out);
+                    currentOrders.totalAmount0Out = currentOrders
+                        .totalAmount0Out
+                        .sub(amount1Out);
+                    currentOrders.totalAmount1Out = currentOrders
+                        .totalAmount1Out
+                        .sub(amount1Out);
+                    amount = amount.sub(amount1Out);
+                    order.amount1Out = 0;
+                    delete currentOrders.orders[i];
+                    currentOrders.totalAmount1Out = currentOrders
+                        .totalAmount1Out
+                        .sub(amount1Out);
+
+                    // push remainder to orders
+                    if (amount > 0) {
+                        _pushNewOrderForCoW(amount, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    function _performToken1CowMatching(address taker, uint256 amount) internal {
+        if (amount == 0) {
+            return;
+        }
+        CoW.Orders storage currentOrders = orders[block.number];
+        for (uint i = 0; i < currentOrders.orders.length; i++) {
+            CoW.Order memory order = currentOrders.orders[i];
+            uint256 amount0Out = order.amount0Out;
+            if (amount0Out > 0) {
+                if (amount0Out > amount) {
+                    _safeTransfer(token1, taker, amount);
+                    _safeTransfer(token0, order.taker, amount);
+                    currentOrders.totalAmount1Out = currentOrders
+                        .totalAmount1Out
+                        .sub(amount);
+                    currentOrders.totalAmount0Out = currentOrders
+                        .totalAmount0Out
+                        .sub(amount);
+                    amount = 0;
+                    order.amount0Out = order.amount0Out.sub(amount);
+                    currentOrders.orders[i] = order;
+                } else {
+                    _safeTransfer(token1, taker, amount0Out);
+                    _safeTransfer(token0, order.taker, amount0Out);
+                    currentOrders.totalAmount1Out = currentOrders
+                        .totalAmount1Out
+                        .sub(amount0Out);
+                    currentOrders.totalAmount0Out = currentOrders
+                        .totalAmount0Out
+                        .sub(amount0Out);
+                    amount = amount.sub(amount0Out);
+                    order.amount0Out = 0;
+                    delete currentOrders.orders[i];
+                    currentOrders.totalAmount0Out = currentOrders
+                        .totalAmount0Out
+                        .sub(amount0Out);
+
+                    // push remainder to orders
+                    if (amount > 0) {
+                        _pushNewOrderForCoW(0, amount);
+                    }
+                }
+            }
+        }
     }
 
     // this low-level function should be called from a contract which performs important safety checks
