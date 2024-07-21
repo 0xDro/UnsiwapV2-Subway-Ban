@@ -210,6 +210,7 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
 
         if (_checkIsNewBlock()) {
             _settleRemainder();
+            delete orders[block.number - 1];
         }
 
         if (_canExecuteCoW(amount0Out, amount1Out)) {
@@ -227,11 +228,22 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
     }
 
     function _settleRemainder() internal {
-        CoW.Orders storage currentOrders = orders[block.number - 1];
-        for (uint i = 0; i < currentOrders.orders.length; i++) {
-            CoW.Order memory order = currentOrders.orders[i];
-            _ammSwap(order.amount0Out, order.amount1Out, order.taker, "");
+        CoW.Orders storage prevBlockOrders = orders[block.number - 1];
+        for (uint i = 0; i < prevBlockOrders.orders.length; i++) {
+            CoW.Order memory order = prevBlockOrders.orders[i];
+            // check requirments so the next call cannot fail, if it would fail, refund and move onto next order
+            if (_canMakeValidAmmSwap()) {
+                _ammSwap(order.amount0Out, order.amount1Out, order.taker, "");
+            } else {
+                _refundTrader();
+            }
         }
+    }
+
+    function _refundTrader() internal {}
+
+    function _canMakeValidAmmSwap() internal view returns (bool) {
+        return true;
     }
 
     function _canExecuteCoW(
@@ -272,7 +284,7 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         uint256 amount1Out
     ) internal {
         _performToken0CoWMatching(taker, amount0Out);
-        _performToken1CowMatching(taker, amount1Out);
+        _performToken1CoWMatching(taker, amount1Out);
     }
 
     function _performToken0CoWMatching(address taker, uint256 amount) internal {
@@ -280,90 +292,99 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
             return;
         }
         CoW.Orders storage currentOrders = orders[block.number];
+        (uint112 _reserve0, uint112 _reserve1, ) = getReserves();
+        uint256 exchangeRate = uint256(_reserve1).mul(1e18).div(_reserve0); // token1 per token0
+
         for (uint i = 0; i < currentOrders.orders.length; i++) {
             CoW.Order memory order = currentOrders.orders[i];
             uint256 amount1Out = order.amount1Out;
             if (amount1Out > 0) {
-                if (amount1Out > amount) {
+                uint256 equivalentAmount1 = amount.mul(exchangeRate).div(1e18);
+                if (amount1Out > equivalentAmount1) {
                     _safeTransfer(token0, taker, amount);
-                    _safeTransfer(token1, order.taker, amount);
+                    _safeTransfer(token1, order.taker, equivalentAmount1);
                     currentOrders.totalAmount0Out = currentOrders
                         .totalAmount0Out
                         .sub(amount);
                     currentOrders.totalAmount1Out = currentOrders
                         .totalAmount1Out
-                        .sub(amount);
-                    amount = 0;
-                    order.amount1Out = order.amount1Out.sub(amount);
+                        .sub(equivalentAmount1);
+                    order.amount1Out = order.amount1Out.sub(equivalentAmount1);
                     currentOrders.orders[i] = order;
+                    amount = 0;
+                    break;
                 } else {
-                    _safeTransfer(token0, taker, amount1Out);
+                    uint256 equivalentAmount0 = amount1Out.mul(1e18).div(
+                        exchangeRate
+                    );
+                    _safeTransfer(token0, taker, equivalentAmount0);
                     _safeTransfer(token1, order.taker, amount1Out);
                     currentOrders.totalAmount0Out = currentOrders
                         .totalAmount0Out
-                        .sub(amount1Out);
+                        .sub(equivalentAmount0);
                     currentOrders.totalAmount1Out = currentOrders
                         .totalAmount1Out
                         .sub(amount1Out);
-                    amount = amount.sub(amount1Out);
+                    amount = amount.sub(equivalentAmount0);
                     order.amount1Out = 0;
                     delete currentOrders.orders[i];
-                    currentOrders.totalAmount1Out = currentOrders
-                        .totalAmount1Out
-                        .sub(amount1Out);
-
-                    // push remainder to orders
-                    if (amount > 0) {
-                        _pushNewOrderForCoW(amount, 0);
-                    }
                 }
             }
         }
-    }
 
-    function _performToken1CowMatching(address taker, uint256 amount) internal {
+        // push remainder to orders
+        if (amount > 0) {
+            _pushNewOrderForCoW(amount, 0);
+        }
+    }
+    function _performToken1CoWMatching(address taker, uint256 amount) internal {
         if (amount == 0) {
             return;
         }
         CoW.Orders storage currentOrders = orders[block.number];
+        (uint112 _reserve0, uint112 _reserve1, ) = getReserves();
+        uint256 exchangeRate = uint256(_reserve0).mul(1e18).div(_reserve1); // token0 per token1
+
         for (uint i = 0; i < currentOrders.orders.length; i++) {
             CoW.Order memory order = currentOrders.orders[i];
             uint256 amount0Out = order.amount0Out;
             if (amount0Out > 0) {
-                if (amount0Out > amount) {
+                uint256 equivalentAmount0 = amount.mul(exchangeRate).div(1e18);
+                if (amount0Out > equivalentAmount0) {
                     _safeTransfer(token1, taker, amount);
-                    _safeTransfer(token0, order.taker, amount);
+                    _safeTransfer(token0, order.taker, equivalentAmount0);
                     currentOrders.totalAmount1Out = currentOrders
                         .totalAmount1Out
                         .sub(amount);
                     currentOrders.totalAmount0Out = currentOrders
                         .totalAmount0Out
-                        .sub(amount);
-                    amount = 0;
-                    order.amount0Out = order.amount0Out.sub(amount);
+                        .sub(equivalentAmount0);
+                    order.amount0Out = order.amount0Out.sub(equivalentAmount0);
                     currentOrders.orders[i] = order;
+                    amount = 0;
+                    break;
                 } else {
-                    _safeTransfer(token1, taker, amount0Out);
+                    uint256 equivalentAmount1 = amount0Out.mul(1e18).div(
+                        exchangeRate
+                    );
+                    _safeTransfer(token1, taker, equivalentAmount1);
                     _safeTransfer(token0, order.taker, amount0Out);
                     currentOrders.totalAmount1Out = currentOrders
                         .totalAmount1Out
-                        .sub(amount0Out);
+                        .sub(equivalentAmount1);
                     currentOrders.totalAmount0Out = currentOrders
                         .totalAmount0Out
                         .sub(amount0Out);
-                    amount = amount.sub(amount0Out);
+                    amount = amount.sub(equivalentAmount1);
                     order.amount0Out = 0;
                     delete currentOrders.orders[i];
-                    currentOrders.totalAmount0Out = currentOrders
-                        .totalAmount0Out
-                        .sub(amount0Out);
-
-                    // push remainder to orders
-                    if (amount > 0) {
-                        _pushNewOrderForCoW(0, amount);
-                    }
                 }
             }
+        }
+
+        // push remainder to orders if there is any leftover amount1
+        if (amount > 0) {
+            _pushNewOrderForCoW(0, amount);
         }
     }
 
