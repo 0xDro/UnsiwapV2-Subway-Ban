@@ -208,13 +208,22 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
             "UniswapV2: INSUFFICIENT_OUTPUT_AMOUNT"
         );
 
+        require(
+            amount0Out == 0 || amount1Out == 0,
+            "UniswapV2: INVALID_AMOUNT_OUT"
+        );
+
         if (_checkIsNewBlock()) {
             _settleRemainder();
             delete orders[block.number - 1];
         }
 
         if (_canExecuteCoW(amount0Out, amount1Out)) {
-            _matchCoW(to, amount0Out, amount1Out);
+            if (amount0Out > 0) {
+                _performToken0CoWMatching(to, amount0Out);
+            } else {
+                _performToken1CoWMatching(to, amount1Out);
+            }
         } else {
             _pushNewOrderForCoW(amount0Out, amount1Out);
         }
@@ -237,6 +246,12 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
             } else {
                 _refundTrader();
             }
+        }
+    }
+
+    function settleRemainder() external lock {
+        if (_checkIsNewBlock()) {
+            _settleRemainder();
         }
     }
 
@@ -276,15 +291,6 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         currentOrders.totalAmount1Out = currentOrders.totalAmount1Out.add(
             amount1Out
         );
-    }
-
-    function _matchCoW(
-        address taker,
-        uint256 amount0Out,
-        uint256 amount1Out
-    ) internal {
-        _performToken0CoWMatching(taker, amount0Out);
-        _performToken1CoWMatching(taker, amount1Out);
     }
 
     function _performToken0CoWMatching(address taker, uint256 amount) internal {
