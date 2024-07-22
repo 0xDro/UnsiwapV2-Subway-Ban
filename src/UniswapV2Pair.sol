@@ -202,6 +202,7 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         emit Burn(msg.sender, amount0, amount1, to);
     }
 
+    // new external swap function that allows for CoW and only depends on AMM swaps if needed
     function swap(uint amount0Out, uint amount1Out, address to) external lock {
         require(
             amount0Out > 0 || amount1Out > 0,
@@ -225,7 +226,17 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
                 _performToken1CoWMatching(to, amount1Out);
             }
         } else {
+            require(
+                amount0Out == 0 || amount1Out == 0,
+                "UniswapV2: INVALID_AMOUNT_OUT"
+            );
             _pushNewOrderForCoW(amount0Out, amount1Out);
+        }
+    }
+
+    function settleRemainder() public lock {
+        if (_checkIsNewBlock()) {
+            _settleRemainder();
         }
     }
 
@@ -240,7 +251,6 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         CoW.Orders storage prevBlockOrders = orders[block.number - 1];
         for (uint i = 0; i < prevBlockOrders.orders.length; i++) {
             CoW.Order memory order = prevBlockOrders.orders[i];
-            // check requirments so the next call cannot fail, if it would fail, refund and move onto next order
             if (_canMakeValidAmmSwap()) {
                 _ammSwap(order.amount0Out, order.amount1Out, order.taker, "");
             } else {
@@ -249,18 +259,16 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         }
     }
 
-    function settleRemainder() external lock {
-        if (_checkIsNewBlock()) {
-            _settleRemainder();
-        }
-    }
-
+    // should refund a traders input if the AMM cannot make a valid swap
     function _refundTrader() internal {}
 
+    // should ensure a valid amm swap can be made
+    // this is to ensure the contract isn't bricked by reverting call
     function _canMakeValidAmmSwap() internal view returns (bool) {
         return true;
     }
 
+    // check if there are inverse orders in any given block
     function _canExecuteCoW(
         uint256 amount0Out,
         uint256 amount1Out
@@ -276,6 +284,7 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         return false;
     }
 
+    // store order in state that cannot be matched as of now
     function _pushNewOrderForCoW(uint amount0Out, uint amount1Out) internal {
         CoW.Orders storage currentOrders = orders[block.number];
         CoW.Order memory newOrder = CoW.Order({
@@ -293,6 +302,7 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
         );
     }
 
+    // perform CoW matching for token0
     function _performToken0CoWMatching(address taker, uint256 amount) internal {
         if (amount == 0) {
             return;
@@ -343,6 +353,8 @@ contract UniswapV2Pair is IUniswapV2Pair, UniswapV2ERC20 {
             _pushNewOrderForCoW(amount, 0);
         }
     }
+
+    // perform CoW matching for token1
     function _performToken1CoWMatching(address taker, uint256 amount) internal {
         if (amount == 0) {
             return;
